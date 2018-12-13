@@ -5,8 +5,10 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <deque>
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
+#include "Eigen-3.3/Eigen/Dense"
 #include "json.hpp"
 #include "spline.h"
 
@@ -14,11 +16,33 @@ using namespace std;
 
 // for convenience
 using json = nlohmann::json;
+using Eigen::MatrixXd;
+using Eigen::VectorXd;
+
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
+
+const double TIME_STEP = 0.02;
+const double MPH_TO_MPS = 0.44704;  // miles per hour to meters per second
+const double SPEED_LIMIT = 49.5 * MPH_TO_MPS;
+const double MAX_ACC = 9.0;
+const double MAX_JERK = 9.0;
+
+// The max s value before wrapping around the track back to 0
+const double max_s = 6945.554;
+double half_max_s = max_s / 2.0;
+
+
+
+// save previous frenet trajectory globally
+deque<double> prev_s_traj, prev_d_traj;
+vector<deque<double>> prev_frenet_trajectory = {prev_s_traj, prev_d_traj};
+
+vector<tk::spline> global_splines;
+int lane_change_target_lane = 1;
 
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
@@ -39,7 +63,22 @@ double distance(double x1, double y1, double x2, double y2)
 {
 	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
 }
-int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
+
+vector<double> derivative(vector<double> coeff) {
+  vector<double> derivative_coeffs;
+  for (int i = 1; i < coeff.size(); i++) {
+    derivative_coeffs.push_back(i * coeff[i]);
+  }
+  return derivative_coeffs;
+}
+
+double s_dist(double car_s, double target_s) {
+  if (target_s < (car_s - half_max_s)) target_s += max_s;
+  if (target_s > (car_s + half_max_s)) target_s -= max_s;
+  return target_s - car_s;
+}
+
+int ClosestWaypoint(double x, double y, vector<double> maps_x, vector<double> maps_y)
 {
 
 	double closestLen = 100000; //large number
@@ -177,7 +216,7 @@ int main() {
   // Waypoint map to read from
   string map_file_ = "../data/highway_map.csv";
   // The max s value before wrapping around the track back to 0
-  double max_s = 6945.554;
+ 
 
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
@@ -201,6 +240,8 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
+  // Generate spline and save it for later use
+  generate_splines(map_waypoints_x, map_waypoints_y);
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
