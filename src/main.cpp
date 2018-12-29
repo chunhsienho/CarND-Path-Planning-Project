@@ -35,6 +35,14 @@ const double MAX_JERK = 9.0;
 const double max_s = 6945.554;
 double half_max_s = max_s / 2.0;
 
+//set some state machine 
+enum CarState{
+vehicle_following,
+lane_change_left,
+lane_change_right,
+velocity_keep,
+};
+CarState current_vehicle_state = velocity_keep;
 
 
 // save previous frenet trajectory globally
@@ -111,7 +119,7 @@ int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x,
 
 	double heading = atan2((map_y-y),(map_x-x));
 
-	double angle = fabs(theta-heading);
+	double angle = fabs(theta-heading); // return 
   angle = min(2*pi() - angle, angle);
 
   if(angle > pi()/4)
@@ -285,9 +293,25 @@ int main() {
           	vector<double> next_y_vals;
 
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-          	msgJson["next_x"] = next_x_vals;
-          	msgJson["next_y"] = next_y_vals;
+          // Behavior plaining
+          vector<double> car = {car_s, car_d, car_speed};
+          update_car_state(car, sensor_fusion);
+
+
+          // Trajectory Genereation
+          auto final_trajectory = generate_trajectory(
+              j[1], sensor_fusion,
+              map_waypoints_s, map_waypoints_x, map_waypoints_y,
+              map_waypoints_dx, map_waypoints_dy);
+
+          // std::cout << "traj_size:" << best_trajectory[0].size() << std::endl;
+
+          next_x_vals = final_trajectory[0];
+          next_y_vals = final_trajectory[1];
+
+          // TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+          msgJson["next_x"] = next_x_vals;
+          msgJson["next_y"] = next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
