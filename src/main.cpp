@@ -277,6 +277,355 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 	return {x, y};
 }
 
+/* JMT: jerk minimized trajectory */
+vector<double> JMT(vector< double> start, vector <double> end, double T)
+{
+  /*
+  Calculate the Jerk Minimizing Trajectory that connects the initial state
+  to the final state in time T.
+
+  INPUTS
+
+  start - the vehicles start location given as a length three array
+      corresponding to initial values of [s, s_dot, s_double_dot]
+
+  end   - the desired end state for vehicle. Like "start" this is a
+      length three array.
+
+  T     - The duration, in seconds, over which this maneuver should occur.
+
+  OUTPUT
+  an array of length 6, each value corresponding to a coefficent in the polynomial
+  s(t) = a_0 + a_1 * t + a_2 * t**2 + a_3 * t**3 + a_4 * t**4 + a_5 * t**5
+
+  EXAMPLE
+
+  > JMT( [0, 10, 0], [10, 10, 0], 1)
+  [0.0, 10.0, 0.0, 0.0, 0.0, 0.0]
+  */
+
+  MatrixXd A = MatrixXd(3, 3);
+	A << T*T*T, T*T*T*T, T*T*T*T*T,
+      3*T*T, 4*T*T*T,5*T*T*T*T,
+      6*T, 12*T*T, 20*T*T*T;
+
+	MatrixXd B = MatrixXd(3,1);
+	B << end[0]-(start[0]+start[1]*T+.5*start[2]*T*T),
+      end[1]-(start[1]+start[2]*T),
+      end[2]-start[2];
+
+	MatrixXd Ai = A.inverse();
+
+	MatrixXd C = Ai*B;
+
+	vector <double> result = {start[0], start[1], .5*start[2]};
+	for(int i = 0; i < C.size(); i++)
+	{
+    result.push_back(C.data()[i]);
+	}
+
+	return result;
+}
+
+int get_lane(double car_d) {
+  int lane_id = 0;
+  if (4.0 < car_d && car_d <= 8.0) {
+    lane_id = 1;
+  } else if (8.0 < car_d) {
+    lane_id = 2;
+  }
+  return lane_id;
+}
+
+double sensor_fusion_speed(json car_data) {
+    int car_id = car_data[0];
+    double car_x = car_data[1];
+    double car_y = car_data[2];
+    double car_vx = car_data[3];
+    double car_vy = car_data[4];
+    double car_s = car_data[5];
+    double car_d = car_data[6];
+    return sqrt(car_vx * car_vx + car_vy * car_vy);
+}
+
+int get_leading_vehicle_id(double car_s, double car_d, const json &sensor_fusion) {
+  int current_lane = get_lane(car_d);
+
+  int leading_vehicle_id = -1;
+  double closest_distance = 1e5; // large number
+  for (int vehicle_idx = 0; vehicle_idx < sensor_fusion.size(); vehicle_idx++) {
+    json car_data = sensor_fusion[vehicle_idx];
+    int vehicle_id = car_data[0];
+    double vehicle_x = car_data[1];
+    double vehicle_y = car_data[2];
+    double vehicle_vx = car_data[3];
+    double vehicle_vy = car_data[4];
+    double vehicle_s = car_data[5];
+    double vehicle_d = car_data[6];
+
+    // distance to target, positive means ahead, negative means behind
+    car_s = fmod(car_s, max_s);
+    double distance = s_dist(car_s, vehicle_s);
+
+    if (distance < 0 || abs(vehicle_d - car_d) > 2.5) {
+      continue;
+    }
+    if (distance < 100.0 && distance < closest_distance) {
+      leading_vehicle_id = vehicle_id;
+      closest_distance = distance;
+    }
+  }
+  return leading_vehicle_id;
+}
+
+json get_leading_vehicle_by_id(int id, const json &sensor_fusion) {
+  for (int i = 0; i < sensor_fusion.size(); i++) {
+    json car_data = sensor_fusion[i];
+    if (car_data[0] == id) {
+      return car_data;
+    }
+  }
+  assert(false); // vehicle id not found
+}
+
+//update car state machine 
+void update_car_state(const vector<double> car, const json &sensor_fusion) {
+
+  double car_s = car[0];
+  double car_d = car[1];
+  double car_speed = car[2];
+  int current_lane = get_lane(car_d);
+
+  int leading_vehicle_id = get_leading_vehicle_id(car_s, car_d, sensor_fusion);
+
+  json leading_vehicle_data;
+  double lv_s, lv_d, lv_dist;
+  if (leading_vehicle_id != -1) {
+    leading_vehicle_data = get_leading_vehicle_by_id(leading_vehicle_id, sensor_fusion);
+    lv_s = leading_vehicle_data[5];
+    lv_d = leading_vehicle_data[6];
+    lv_dist = lv_s - car_s;
+  }
+
+  double KEEP_SPEED_DIST = 50.0;
+  bool left_is_clear = true;
+  bool right_is_clear = true;
+  for (int vid = 0; vid < sensor_fusion.size(); vid++) {
+    json car_data = sensor_fusion[vid];
+    int vehicle_id = car_data[0];
+    double vehicle_x = car_data[1];
+    double vehicle_y = car_data[2];
+    double vehicle_vx = car_data[3];
+    double vehicle_vy = car_data[4];
+    double vehicle_s = car_data[5];
+    double vehicle_d = car_data[6];
+    double vehicle_dist = s_dist(car_s, vehicle_s);
+
+    int vehicle_lane = get_lane(vehicle_d);
+    if (-20.0 <= vehicle_dist && vehicle_dist <= (KEEP_SPEED_DIST + 10.0)) {
+      if (vehicle_lane == (current_lane - 1))
+        left_is_clear = false;
+      if (vehicle_lane == (current_lane + 1))
+        right_is_clear = false;
+    }
+    if (current_lane == 0)
+      left_is_clear = false;
+    if (current_lane == 2)
+      right_is_clear = false;
+  }
+
+  if (current_vehicle_state == velocity_keep) {
+    double target_d = 2.0 + current_lane * 4.0;
+    double target_d_diff = abs(target_d - car_d);
+    if (leading_vehicle_id == -1 || lv_dist > KEEP_SPEED_DIST) {
+      // keep current state
+    } else {
+      current_vehicle_state = vehicle_following;
+    }
+  } else if (current_vehicle_state == vehicle_following) {
+    double target_d = 2.0 + current_lane * 4.0;
+    double target_d_diff = abs(target_d - car_d);
+    if (leading_vehicle_id == -1 || lv_dist > (KEEP_SPEED_DIST + 10.0)) {
+      current_vehicle_state = velocity_keep;
+    } else if(target_d_diff > 0.1) {
+      // don't change lane before cetering current lane
+      std::cout << "Keep in center of lane\n";
+    }else if (left_is_clear) {
+      current_vehicle_state = lane_change_left;
+      lane_change_target_lane = current_lane - 1;
+    } else if (right_is_clear) {
+      current_vehicle_state = lane_change_right;
+      lane_change_target_lane = current_lane + 1;
+    }
+  } else if (current_vehicle_state == lane_change_left) {
+    double target_d = 2.0 + lane_change_target_lane * 4.0;
+    double target_d_diff = abs(target_d - car_d);
+    if (target_d_diff >= 0.1) {
+      // center current lane
+    } else {
+      current_vehicle_state = velocity_keep;
+    }
+  } else if (current_vehicle_state == lane_change_right) {
+    double target_d = 2.0 + lane_change_target_lane * 4.0;
+    double target_d_diff = abs(target_d - car_d);
+    if (target_d_diff >= 0.1) {
+      // cener curerrent lane
+    } else {
+      current_vehicle_state = velocity_keep;
+    }
+  }
+  std::cout << "current state:" << current_vehicle_state << " target lane:" << lane_change_target_lane<< std::endl;
+}
+
+double poly_eval(double x, vector<double> coeffs) {
+  double result = 0.0;
+  double t = 1.0;
+  for(int i=0; i<coeffs.size(); i++){
+    result += coeffs[i] * t;
+    t *= x;
+  }
+  return result;
+}
+
+// helper function to get x, x_d, x_dd using the last 3 trajectory
+vector<double> get_traj_end_config(deque<double> traj) {
+  int traj_size = traj.size();
+  assert(traj_size >= 3);
+  double x0 = traj[traj_size - 3];
+  double x1 = traj[traj_size - 2];
+  double x2 = traj[traj_size - 1];
+
+  double v1 = (x1 - x0) / TIME_STEP;
+  double v2 = (x2 - x0) / TIME_STEP;
+
+  double a2 = (v2 - v1) / TIME_STEP;
+  return {x2, v2, a2};
+}
+
+double collision_cost(vector<deque<double>> traj, vector<vector<vector<double>>> predictions) {
+  auto traj_s = traj[0];
+  auto traj_d = traj[1];
+  assert(predictions[0].size() == traj_s.size());
+
+  for (int v = 0; v < predictions.size(); v++) {
+    auto target_prediciton = predictions[v];
+    for (int i = 0; i < traj_s.size(); i++) {
+      // our car is named "eagle"
+      double eagle_s = traj_s[i];
+      double eagle_d = traj_d[i];
+
+      auto target_pos = target_prediciton[i];
+      auto target_s = target_pos[0];
+      auto target_d = target_pos[1];
+
+      if (abs(eagle_d - target_d) < 3.0) {
+        double s_distance = s_dist(eagle_s, target_s);
+        if (abs(s_distance) < 5.0) { // will collide
+          // std::cout << "Will kiss: \n";
+          // std::cout << "i:" << i << ", eagle_s:" << eagle_s << ", eagle_d" << eagle_d;
+          // std::cout << ", target_s:" << target_s << ", target_d" << target_d << std::endl;
+          return 1.0;
+        }
+      }
+    }
+  }
+  return 0.0;
+}
+
+// Binary cost function that checks whether the car breaks the speed limit
+double speed_range_cost(vector<deque<double>> traj) {
+  auto traj_s = traj[0];
+  auto traj_d = traj[1];
+  int traj_size = traj_s.size();
+
+  double min_speed = SPEED_LIMIT;
+  double max_speed = 0.0;
+
+  for(int i = 1; i < traj_size; i++) {
+    double s1 = traj_s[i];
+    double s0 = traj_s[i - 1];
+    double v = (s1 - s0) / TIME_STEP;
+
+    min_speed = min_speed > v? v: min_speed;
+    max_speed = max_speed < v? v: max_speed;
+  }
+
+  double TARGET_RATIO = 0.9;
+  double target_speed = SPEED_LIMIT * TARGET_RATIO;
+  double min_speed_cost = 0.0;
+  double max_speed_cost = 0.0;
+  if (min_speed < target_speed) {
+    min_speed_cost = 1.0 - min_speed / target_speed;
+  }
+
+  if (max_speed > target_speed) {
+    max_speed_cost = (max_speed - target_speed) / (SPEED_LIMIT - target_speed);
+  }
+
+  return (max_speed_cost + min_speed_cost) / 2.0;
+}
+
+double d_offset_cost(vector<deque<double>> traj) {
+  auto traj_s = traj[0];
+  auto traj_d = traj[1];
+  int traj_size = traj_s.size();
+  double total_offset = 0.0;
+  for (int i = 0; i < traj_size; i++) {
+    double d = traj_d[i];
+    total_offset += abs(fmod(d, 4.0) - 2.0) / 2.0;
+  }
+  return total_offset / traj_size;
+}
+
+vector<vector<vector<double>>> enumerate_coeffs_combs(
+    vector<vector<double>> possible_s_coeffs,
+    vector<vector<double>> possible_d_coeffs) {
+
+  std::cout << "s:" << possible_s_coeffs.size() << " d:" << possible_d_coeffs.size() << std::endl;
+  vector<vector<vector<double>>> combinations;
+  for (int i = 0; i < possible_s_coeffs.size(); i++) {
+    for (int j = 0; j < possible_d_coeffs.size(); j++) {
+      auto s_coeffs = possible_s_coeffs[i];
+      auto d_coeffs = possible_d_coeffs[j];
+      combinations.push_back({s_coeffs, d_coeffs});
+    }
+  }
+  return combinations;
+}
+
+// check whether the JMT coefficients will break the car limits
+// within check_duration
+bool check_is_d_JMT_good(vector<double> jmt_coeffs, double check_duration) {
+  auto v_coeffs = derivative(jmt_coeffs);
+  auto a_coeffs = derivative(v_coeffs);
+  for (double t = TIME_STEP; t <= check_duration; t += TIME_STEP) {
+    double v = poly_eval(t, v_coeffs);
+    double a = abs(poly_eval(t, a_coeffs));
+    if (v > SPEED_LIMIT || a > MAX_ACC) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// check whether the JMT coefficients will break the car limits
+// within check_duration
+bool check_is_s_JMT_good(vector<double> jmt_coeffs, double check_duration) {
+  auto v_coeffs = derivative(jmt_coeffs);
+  auto a_coeffs = derivative(v_coeffs);
+  auto jerk_coeffs = derivative(a_coeffs);
+  for (double t = TIME_STEP; t <= check_duration; t += TIME_STEP) {
+    double v = poly_eval(t, v_coeffs);
+    double a = abs(poly_eval(t, a_coeffs));
+    double jerk = abs(poly_eval(t, jerk_coeffs));
+    if (v > SPEED_LIMIT || v < 0.0 || a > MAX_ACC || jerk > MAX_JERK) {
+      return false;
+    }
+  }
+  return true;
+}
+
+
 vector<vector<double>> generate_trajectory(
     const json &car, const json &sensor_fusion,
     vector<double> maps_s, vector<double> maps_x, vector<double> maps_y,
@@ -315,7 +664,7 @@ vector<vector<double>> generate_trajectory(
   } 
   else {
  // remove trajectories that already been comsumed
-if (prev_s_vals.size() > previous_path_x.size())
+while (prev_s_vals.size() > previous_path_x.size())
 {
       prev_s_vals.pop_front();
       prev_d_vals.pop_front();
@@ -354,10 +703,10 @@ if (prev_s_vals.size() > previous_path_x.size())
   }
   vector<double> start_s_config = {start_s, start_s_d, start_s_dd};
   vector<double> start_d_config = {start_d, start_d_d, start_d_dd};
-  // Velocity keeping
-  if (current_car_state == velocity_keeping ||
-      current_car_state == lane_change_left ||
-      current_car_state == lane_change_right) {
+  // Velocity keep
+  if (current_vehicle_state == velocity_keep ||
+      current_vehicle_state == lane_change_left ||
+      current_vehicle_state == lane_change_right) {
 
     double end_s = start_s + 100.0;
     double min_duration = 0.1;
@@ -371,8 +720,8 @@ if (prev_s_vals.size() > previous_path_x.size())
       }
     }
     int target_lane = get_lane(start_d);
-    if (current_car_state == lane_change_left ||
-        current_car_state == lane_change_right) {
+    if (current_vehicle_state == lane_change_left ||
+        current_vehicle_state == lane_change_right) {
       target_lane = lane_change_target_lane;
     }
     double target_d = 2.0 + 4.0 * target_lane;
@@ -387,7 +736,7 @@ if (prev_s_vals.size() > previous_path_x.size())
         possible_d_coeffs.push_back(d_coeffs);
       }
     }
-  } else if (current_car_state == vehicle_following) {
+  } else if (current_vehicle_state == vehicle_following) {
 
     double car_s = car["s"];
     double car_d = car["d"];
