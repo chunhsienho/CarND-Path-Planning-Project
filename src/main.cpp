@@ -379,6 +379,14 @@ if (prev_s_vals.size() > previous_path_x.size())
     std::cout << "target lane:" << target_lane << ", target_d:" << target_d << std::endl;
     double duration = 4.0;
     double target_d_speed = 0.0;
+// use the JMT to minimize the jerk and get the d_coeff
+    for (double d_offset = -0.4; d_offset <= 0.4; d_offset += 0.2) {
+      vector<double> try_end_d = {target_d + d_offset, target_d_speed, 0.0};
+      auto d_coeffs = JMT(start_d_config, try_end_d, duration);
+      if (check_is_d_JMT_good(d_coeffs, duration)) {
+        possible_d_coeffs.push_back(d_coeffs);
+      }
+    }
   } else if (current_car_state == vehicle_following) {
 
     double car_s = car["s"];
@@ -421,6 +429,16 @@ if (prev_s_vals.size() > previous_path_x.size())
     double target_d = 2.0 + 4.0 * target_lane;
     double duration = 4.0;
     double target_d_speed = 0.0;
+//check the jmt work or not
+    for (double d_offset = -0.4; d_offset <= 0.4; d_offset += 0.2) {
+      vector<double> try_end_d = {target_d + d_offset, target_d_speed, 0.0};
+      auto d_coeffs = JMT(start_d_config, try_end_d, duration);
+      if (check_is_d_JMT_good(d_coeffs, duration)) {
+        possible_d_coeffs.push_back(d_coeffs);
+      }
+    }
+  }
+
   int total_stpes = PREDICT_HORIZON / TIME_STEP;
 
   // Calculate future sensor fusion for costs
@@ -445,6 +463,20 @@ if (prev_s_vals.size() > previous_path_x.size())
     }
     predictions.push_back(vehicle_prediction);
   }
+
+
+  // Try to evaluate the cost of different variations
+  double min_cost = 1e10;
+  vector<deque<double>> best_traj;
+
+  auto combinations = enumerate_coeffs_combs(possible_s_coeffs, possible_d_coeffs);
+  assert(combinations.size() > 0);
+  for (int c = 0; c < combinations.size(); c++) {
+    auto a_comb = combinations[c];
+    auto s_coeffs = a_comb[0];
+    auto d_coeffs = a_comb[1];
+
+
     deque<double> next_s_vals;
     deque<double> next_d_vals;
 
@@ -453,6 +485,35 @@ if (prev_s_vals.size() > previous_path_x.size())
       next_s_vals.push_back(prev_s_vals[i]);
       next_d_vals.push_back(prev_d_vals[i]);
     }
+
+    int num_prev_steps = prev_s_vals.size();
+    int total_stpes = PREDICT_HORIZON / TIME_STEP;
+
+    for (int i = 0; (i + num_prev_steps) < total_stpes; i++) {
+      double t = (i + 1) * TIME_STEP;
+      double s = poly_eval(t, s_coeffs);
+      double d = poly_eval(t, d_coeffs);
+
+      next_s_vals.push_back(fmod((s + max_s), max_s));
+      next_d_vals.push_back(d);
+    }
+
+    double cost = 0.0;
+    auto trajectory = {next_s_vals, next_d_vals};
+    // calculate the cost for speed, collision and jerk
+    cost += 1000.0 * collision_cost(trajectory, predictions);
+    cost += 50.0 * speed_range_cost(trajectory);
+    cost += 20.0 * d_offset_cost(trajectory);
+
+    if (cost < min_cost) {
+      min_cost = cost;
+      best_traj.clear();
+      best_traj.push_back(next_s_vals);
+      best_traj.push_back(next_d_vals);
+    }
+  }
+
+
   // std::cout << "best traj:" << best_trajectory_idx << " cost:" << min_cost << std::endl;
   auto best_trajectory = best_traj;
 
