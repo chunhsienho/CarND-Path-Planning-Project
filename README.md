@@ -142,4 +142,22 @@ The following three thing send from c++ code to udacity simulator
 The current car state (Global Cartesian coordinate, Frenet Coordinate, car speed ...)
 Previouly unexecuted trajectory in Cartesian coordinates.
 Sensor fusion data (position and speed of other vehicles)
+# Path Planning.
+The path planning algorithm is done by Finite state machine and Jerk Minimization trajectory with some cost functions.
+
+
+# Finite State machine.
+
+There are 5 state machine in my code (See the update_states function):
+1. Vechile following: It would keep in a safe distance and speed from the vehicle ahead. It would change lane if it is safe to change
+2. Velocity keep: Vehicle will keep the speed as high as possible (but it would not exceed the speed limit since the max speed = 0.9* speed_limit). If it detect any car ahead of the ego vehicle, the vehicle would change to vehicle following mode.
+3. Lane change Left: Car would move to the left target lane in a safe trajectory(s and d tajectory)
+4. Lane Change Right: Car would move to the right target lane in a safe trajectory(s and d tajectory)
+
+# Jerk Minimization trajectory(JMT)
+
+This algorithm use the end of the last trajectory as the start config state of the JMT and generate many possible end state according to currenet state from Finite state machine.
+
+
+
 
