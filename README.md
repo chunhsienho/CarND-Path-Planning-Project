@@ -161,7 +161,7 @@ This algorithm use the end of the last trajectory as the start config state of t
 
 1. Velocity keep/ lane change left and right:
    The trajectory would have different duration and end velocity. I choose the one with minimum cost
-   
+   ```
    //psudo code for sampling different end config
    double target_speed=0.9* speed_limit;
    double target_duration=2.0;
@@ -171,6 +171,7 @@ This algorithm use the end of the last trajectory as the start config state of t
          trajectory = JMT(start_config,end_config,d)
       }
     }
+    ```
     
     2. Vehicle following: This part is like ACC(Adaptive Cruise Control). The vehicle would keep the same speed and a safe distance.
        The end speed and distance are already decided. Here i sample different duration as the end config for JMT.
@@ -184,7 +185,7 @@ The speed can't accelerate the speed limit and the accelerate should less than 1
 
 After validating the trajectory speed and acceleration, I calculate the cost of each sampled valid trajectories. I check the 
 collision, min/max speed and i also check if the car stay in the center of the lane
-
+```
 //psudo code for cost function
 best_traj=None;
 min_cost=1e10;
@@ -196,7 +197,7 @@ for traj in possible_trajectories:
    if cost<min_cost:
       min_cost=cost
       best_traj=traj
-
+```
 
 # Conclusion
 The edge cases and parameter in JMT need many time to handle. The less trajectory sampled, the less time it take to find the best 
